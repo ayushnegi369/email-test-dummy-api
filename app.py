@@ -86,12 +86,30 @@ def fetch_gmail_message(message_id, access_token):
         }
         
         logger.info(f"Fetching Gmail message: {message_id}")
+        logger.info(f"Using access token: {access_token[:20]}..." if access_token else "No access token provided")
+        logger.info(f"Request URL: {url}")
+        
         response = requests.get(url, headers=headers, params=params)
         
+        logger.info(f"Gmail API Response Status: {response.status_code}")
+        
         if response.status_code == 200:
+            logger.info("Successfully fetched Gmail message")
             return response.json()
+        elif response.status_code == 401:
+            logger.error("Gmail API Authentication failed - Invalid or expired access token")
+            logger.error(f"Response: {response.text}")
+            return None
+        elif response.status_code == 403:
+            logger.error("Gmail API Access forbidden - Check API permissions and scopes")
+            logger.error(f"Response: {response.text}")
+            return None
+        elif response.status_code == 404:
+            logger.error(f"Gmail message {message_id} not found")
+            logger.error(f"Response: {response.text}")
+            return None
         else:
-            logger.error(f"Failed to fetch message: {response.status_code} - {response.text}")
+            logger.error(f"Gmail API Error: {response.status_code} - {response.text}")
             return None
             
     except Exception as e:
@@ -587,6 +605,61 @@ def test_gmail_api():
         
     except Exception as e:
         logger.error(f"Error in Gmail test endpoint: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Internal server error: {str(e)}"
+        }), 500
+
+@app.route('/gmail/validate-token', methods=['GET'])
+def validate_gmail_token():
+    """
+    Validate Gmail access token by making a simple API call
+    """
+    try:
+        access_token = os.environ.get('GMAIL_ACCESS_TOKEN')
+        
+        if not access_token:
+            return jsonify({
+                "status": "error",
+                "message": "Gmail access token not configured"
+            }), 400
+        
+        # Test token with a simple profile request
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        logger.info("Testing Gmail access token...")
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            profile_data = response.json()
+            return jsonify({
+                "status": "success",
+                "message": "Gmail access token is valid",
+                "profile": {
+                    "emailAddress": profile_data.get('emailAddress'),
+                    "messagesTotal": profile_data.get('messagesTotal'),
+                    "threadsTotal": profile_data.get('threadsTotal')
+                }
+            }), 200
+        elif response.status_code == 401:
+            return jsonify({
+                "status": "error",
+                "message": "Invalid or expired access token",
+                "details": response.text
+            }), 401
+        else:
+            return jsonify({
+                "status": "error",
+                "message": f"Gmail API Error: {response.status_code}",
+                "details": response.text
+            }), response.status_code
+        
+    except Exception as e:
+        logger.error(f"Error validating Gmail token: {str(e)}")
         return jsonify({
             "status": "error",
             "message": f"Internal server error: {str(e)}"
