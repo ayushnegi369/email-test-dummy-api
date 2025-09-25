@@ -439,7 +439,7 @@ def health_check():
 @app.route('/pubsub/email', methods=['POST'])
 def receive_pubsub_email():
     """
-    Endpoint to receive Pub/Sub messages containing email data
+    Endpoint to receive Pub/Sub messages and fetch actual Gmail messages
     """
     try:
         # Get the request data
@@ -466,21 +466,113 @@ def receive_pubsub_email():
         if not decoded_message:
             return jsonify({"error": "Failed to decode message"}), 400
         
-        # Parse the email message
-        email_data = parse_email_message(decoded_message)
-        
-        if not email_data:
-            return jsonify({"error": "Failed to parse email message"}), 400
-        
-        # Log the processed email
-        logger.info(f"Processed email: Subject='{email_data['subject']}', From='{email_data['from']}'")
-        
-        # Return the structured email data
-        return jsonify({
-            "status": "success",
-            "message": "Email processed successfully",
-            "data": email_data
-        }), 200
+        # Check if it's a Gmail notification
+        try:
+            notification_data = json.loads(decoded_message)
+            if isinstance(notification_data, dict) and 'emailAddress' in notification_data and 'historyId' in notification_data:
+                logger.info("Detected Gmail push notification - fetching actual email messages")
+                
+                # Get access token
+                access_token = os.environ.get('GMAIL_ACCESS_TOKEN')
+                
+                if not access_token:
+                    logger.error("Gmail access token not configured")
+                    return jsonify({
+                        "status": "error",
+                        "message": "Gmail access token not configured. Please set GMAIL_ACCESS_TOKEN environment variable."
+                    }), 400
+                
+                email_address = notification_data.get('emailAddress')
+                history_id = notification_data.get('historyId')
+                
+                logger.info(f"Processing Gmail notification for {email_address}, historyId: {history_id}")
+                
+                # Get message IDs from history
+                message_ids = get_gmail_message_ids_from_history(email_address, history_id, access_token)
+                
+                if message_ids:
+                    # Process all messages (or just the first one)
+                    all_emails = []
+                    
+                    for message_id in message_ids[:5]:  # Limit to first 5 messages
+                        logger.info(f"Fetching Gmail message: {message_id}")
+                        
+                        # Fetch the Gmail message
+                        gmail_message = fetch_gmail_message(message_id, access_token)
+                        
+                        if gmail_message:
+                            # Parse the message
+                            email_data = parse_gmail_message(gmail_message)
+                            
+                            if email_data:
+                                all_emails.append(email_data)
+                                
+                                # Log the actual email content
+                                logger.info("="*80)
+                                logger.info("GMAIL MESSAGE CONTENT:")
+                                logger.info(f"Message ID: {message_id}")
+                                logger.info(f"Subject: {email_data['subject']}")
+                                logger.info(f"From: {email_data['from']}")
+                                logger.info(f"Date: {email_data['date']}")
+                                logger.info(f"Body: {email_data['body'][:500]}...")  # First 500 chars
+                                logger.info(f"Attachments: {len(email_data['attachments'])} files")
+                                logger.info("="*80)
+                    
+                    if all_emails:
+                        # Return the first email (or all emails)
+                        return jsonify({
+                            "status": "success",
+                            "message": f"Successfully fetched {len(all_emails)} Gmail messages",
+                            "data": all_emails[0] if len(all_emails) == 1 else all_emails,
+                            "total_messages": len(all_emails)
+                        }), 200
+                    else:
+                        logger.warning("No emails could be fetched from Gmail API")
+                        return jsonify({
+                            "status": "warning",
+                            "message": "Gmail notification received but no messages could be fetched",
+                            "notification_data": notification_data
+                        }), 200
+                else:
+                    logger.info("No new messages found in Gmail history")
+                    return jsonify({
+                        "status": "info",
+                        "message": "Gmail notification received but no new messages found",
+                        "notification_data": notification_data
+                    }), 200
+            else:
+                # Not a Gmail notification, parse as regular email
+                logger.info("Processing as regular email message")
+                email_data = parse_email_message(decoded_message)
+                
+                if not email_data:
+                    return jsonify({"error": "Failed to parse email message"}), 400
+                
+                # Log the processed email
+                logger.info(f"Processed email: Subject='{email_data['subject']}', From='{email_data['from']}'")
+                
+                return jsonify({
+                    "status": "success",
+                    "message": "Email processed successfully",
+                    "data": email_data
+                }), 200
+                
+        except json.JSONDecodeError:
+            # Not JSON, parse as regular email
+            logger.info("Processing as regular email message")
+            email_data = parse_email_message(decoded_message)
+            
+            if not email_data:
+                return jsonify({"error": "Failed to parse email message"}), 400
+            
+            # Log the processed email
+            logger.info(f"Processed email: Subject='{email_data['subject']}', From='{email_data['from']}'")
+            
+            return jsonify({
+                "status": "success",
+                "message": "Email processed successfully",
+                "data": email_data
+            }), 200
         
     except Exception as e:
         logger.error(f"Error processing Pub/Sub message: {str(e)}")
