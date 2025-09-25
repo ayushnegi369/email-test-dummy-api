@@ -35,18 +35,46 @@ def parse_email_message(raw_email):
     """
     Parse raw email message and extract structured data
     """
-    print("raw_email", raw_email)
     try:
         logger.info(f"Parsing email message. Length: {len(raw_email)}")
         logger.info(f"Raw email preview: {raw_email[:300]}...")
         
+        # Handle different input formats
+        if not raw_email or not raw_email.strip():
+            logger.error("Empty or whitespace-only email message received")
+            return None
+            
+        # Try to parse as JSON first (in case it's already structured)
+        try:
+            json_data = json.loads(raw_email)
+            if isinstance(json_data, dict) and 'subject' in json_data:
+                logger.info("Email data is already in JSON format")
+                return json_data
+        except json.JSONDecodeError:
+            pass  # Not JSON, continue with email parsing
+        
         # Parse the email message
         msg = email.message_from_string(raw_email)
         
-        # Extract basic email information
-        subject = msg.get('Subject', '')
-        from_addr = msg.get('From', '')
-        date_str = msg.get('Date', '')
+        # Extract basic email information with fallbacks
+        subject = msg.get('Subject', '').strip()
+        from_addr = msg.get('From', '').strip()
+        date_str = msg.get('Date', '').strip()
+        
+        # If standard headers are empty, try alternative parsing
+        if not subject and not from_addr:
+            logger.info("Standard email headers not found, trying alternative parsing...")
+            
+            # Try to extract from raw text
+            lines = raw_email.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line.lower().startswith('subject:'):
+                    subject = line[8:].strip()
+                elif line.lower().startswith('from:'):
+                    from_addr = line[5:].strip()
+                elif line.lower().startswith('date:'):
+                    date_str = line[5:].strip()
         
         logger.info(f"Extracted - Subject: '{subject}', From: '{from_addr}', Date: '{date_str}'")
         
@@ -71,9 +99,21 @@ def parse_email_message(raw_email):
                 
                 # Extract body text
                 if content_type == "text/plain" and "attachment" not in content_disposition:
-                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                    try:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode('utf-8', errors='ignore')
+                    except Exception as e:
+                        logger.error(f"Error extracting plain text body: {e}")
+                        body = part.get_payload()
                 elif content_type == "text/html" and "attachment" not in content_disposition and not body:
-                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                    try:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode('utf-8', errors='ignore')
+                    except Exception as e:
+                        logger.error(f"Error extracting HTML body: {e}")
+                        body = part.get_payload()
                 
                 # Extract attachments
                 elif "attachment" in content_disposition:
@@ -90,16 +130,53 @@ def parse_email_message(raw_email):
                             })
         else:
             # Single part message
-            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+            try:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode('utf-8', errors='ignore')
+                else:
+                    body = msg.get_payload()
+            except Exception as e:
+                logger.error(f"Error extracting single part body: {e}")
+                body = str(msg.get_payload())
         
-        # Structure the response
-        email_data = {
-            "subject": subject,
-            "from": from_addr,
-            "date": formatted_date,
-            "body": body.strip(),
-            "attachments": attachments
-        }
+        # If body is still empty, try to extract from raw email
+        if not body.strip():
+            logger.info("Body extraction failed, trying to extract from raw email...")
+            lines = raw_email.split('\n')
+            body_started = False
+            body_lines = []
+            
+            for line in lines:
+                if body_started:
+                    body_lines.append(line)
+                elif line.strip() == "":  # Empty line indicates start of body
+                    body_started = True
+            
+            if body_lines:
+                body = '\n'.join(body_lines).strip()
+        
+        # If we still don't have basic email data, create a fallback response
+        if not subject and not from_addr and not body.strip():
+            logger.warning("No email data could be extracted, creating fallback response")
+            email_data = {
+                "subject": "No Subject",
+                "from": "unknown@example.com",
+                "date": formatted_date,
+                "body": raw_email[:500] if raw_email else "No content available",
+                "attachments": []
+            }
+        else:
+            # Structure the response
+            email_data = {
+                "subject": subject or "No Subject",
+                "from": from_addr or "unknown@example.com", 
+                "date": formatted_date,
+                "body": body.strip() or "No body content",
+                "attachments": attachments
+            }
+        
+        logger.info(f"Final email_data: {email_data}")
         print("email_data : ", email_data)
         return email_data
         
