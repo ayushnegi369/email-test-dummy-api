@@ -9,6 +9,11 @@ from email import encoders
 import logging
 from datetime import datetime
 import os
+import requests
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,10 +36,158 @@ def decode_pubsub_message(message_data):
         logger.error(f"Message data that failed: {message_data}")
         return None
 
+def get_gmail_message_ids_from_history(email_address, history_id, access_token):
+    """
+    Get message IDs from Gmail history using the Gmail API
+    """
+    try:
+        url = f"https://gmail.googleapis.com/gmail/v1/users/me/history"
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'startHistoryId': history_id
+        }
+        
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            history_data = response.json()
+            message_ids = []
+            
+            if 'history' in history_data:
+                for history_item in history_data['history']:
+                    if 'messagesAdded' in history_item:
+                        for message in history_item['messagesAdded']:
+                            message_ids.append(message['message']['id'])
+            
+            return message_ids
+        else:
+            logger.error(f"Failed to get history: {response.status_code} - {response.text}")
+            return []
+            
+    except Exception as e:
+        logger.error(f"Error getting message IDs from history: {str(e)}")
+        return []
+
+def fetch_gmail_message(message_id, access_token):
+    """
+    Fetch email message from Gmail API using message ID
+    """
+    try:
+        url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}"
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'format': 'full'
+        }
+        
+        logger.info(f"Fetching Gmail message: {message_id}")
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.error(f"Failed to fetch message: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error fetching Gmail message: {str(e)}")
+        return None
+
+def parse_gmail_message(gmail_message):
+    """
+    Parse Gmail API message response into our required format
+    """
+    try:
+        if not gmail_message:
+            return None
+            
+        payload = gmail_message.get('payload', {})
+        headers = payload.get('headers', [])
+        
+        # Extract headers
+        subject = ""
+        from_addr = ""
+        date_str = ""
+        
+        for header in headers:
+            name = header.get('name', '').lower()
+            value = header.get('value', '')
+            
+            if name == 'subject':
+                subject = value
+            elif name == 'from':
+                from_addr = value
+            elif name == 'date':
+                date_str = value
+        
+        # Parse date
+        try:
+            if date_str:
+                parsed_date = email.utils.parsedate_to_datetime(date_str)
+                formatted_date = parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                formatted_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            formatted_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Extract body and attachments
+        body = ""
+        attachments = []
+        
+        def extract_parts(part):
+            nonlocal body, attachments
+            
+            if 'parts' in part:
+                for subpart in part['parts']:
+                    extract_parts(subpart)
+            else:
+                mime_type = part.get('mimeType', '')
+                
+                if mime_type == 'text/plain' and not body:
+                    body_data = part.get('body', {}).get('data', '')
+                    if body_data:
+                        body = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                elif mime_type == 'text/html' and not body:
+                    body_data = part.get('body', {}).get('data', '')
+                    if body_data:
+                        body = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                elif part.get('filename'):
+                    # Handle attachments
+                    filename = part.get('filename', '')
+                    attachment_data = part.get('body', {}).get('data', '')
+                    if attachment_data:
+                        attachments.append({
+                            "filename": filename,
+                            "mime_type": mime_type,
+                            "data": attachment_data  # Already base64 encoded
+                        })
+        
+        extract_parts(payload)
+        
+        # Structure the response
+        email_data = {
+            "subject": subject or "No Subject",
+            "from": from_addr or "unknown@example.com",
+            "date": formatted_date,
+            "body": body.strip() or "No body content",
+            "attachments": attachments
+        }
+        
+        logger.info(f"Parsed Gmail message: Subject='{subject}', From='{from_addr}'")
+        return email_data
+        
+    except Exception as e:
+        logger.error(f"Error parsing Gmail message: {str(e)}")
+        return None
+
 def handle_gmail_notification(notification_data):
     """
-    Handle Gmail push notification and create a mock email response
-    Since we don't have Gmail API access, we'll create a structured response
+    Handle Gmail push notification and fetch actual email content
     """
     try:
         email_address = notification_data.get('emailAddress', 'unknown@gmail.com')
@@ -42,22 +195,54 @@ def handle_gmail_notification(notification_data):
         
         logger.info(f"Processing Gmail notification for {email_address}, historyId: {history_id}")
         
-        # Create a mock email response based on the notification
-        # In a real implementation, you would use the Gmail API to fetch the actual email
-        mock_email = {
-            "subject": f"Gmail Notification - History ID {history_id}",
-            "from": email_address,
-            "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "body": f"Gmail push notification received for {email_address}. History ID: {history_id}. To get actual email content, implement Gmail API integration.",
-            "attachments": [],
-            "notification_data": {
-                "emailAddress": email_address,
-                "historyId": history_id,
-                "type": "gmail_push_notification"
-            }
-        }
+        # Get access token from environment variable
+        access_token = os.environ.get('GMAIL_ACCESS_TOKEN')
         
-        return mock_email
+        if not access_token:
+            logger.error("GMAIL_ACCESS_TOKEN not found in environment variables")
+            return {
+                "subject": "Gmail API Error",
+                "from": email_address,
+                "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "body": "Gmail access token not configured. Please set GMAIL_ACCESS_TOKEN environment variable.",
+                "attachments": [],
+                "error": "missing_access_token"
+            }
+        
+        # For now, we'll use a mock message ID since we don't have the actual message ID
+        # In a real implementation, you would get message IDs from the history
+        message_ids = get_gmail_message_ids_from_history(email_address, history_id, access_token)
+        
+        if not message_ids:
+            # If no message IDs from history, create a mock response
+            return {
+                "subject": f"Gmail Notification - History ID {history_id}",
+                "from": email_address,
+                "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "body": f"Gmail push notification received for {email_address}. History ID: {history_id}. No new messages found in history.",
+                "attachments": [],
+                "notification_data": {
+                    "emailAddress": email_address,
+                    "historyId": history_id,
+                    "type": "gmail_push_notification"
+                }
+            }
+        
+        # Fetch the first message (you might want to fetch all messages)
+        message_id = message_ids[0]
+        gmail_message = fetch_gmail_message(message_id, access_token)
+        
+        if gmail_message:
+            return parse_gmail_message(gmail_message)
+        else:
+            return {
+                "subject": "Gmail API Error",
+                "from": email_address,
+                "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "body": f"Failed to fetch message {message_id} from Gmail API",
+                "attachments": [],
+                "error": "fetch_failed"
+            }
         
     except Exception as e:
         logger.error(f"Error handling Gmail notification: {str(e)}")
@@ -313,6 +498,95 @@ def test_email_parsing():
         
     except Exception as e:
         logger.error(f"Error in test endpoint: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Internal server error: {str(e)}"
+        }), 500
+
+@app.route('/gmail/message/<message_id>', methods=['GET'])
+def fetch_gmail_message_endpoint(message_id):
+    """
+    Endpoint to directly fetch a Gmail message by message ID
+    """
+    try:
+        # Get access token from environment variable
+        access_token = os.environ.get('GMAIL_ACCESS_TOKEN')
+        
+        if not access_token:
+            return jsonify({
+                "status": "error",
+                "message": "Gmail access token not configured. Please set GMAIL_ACCESS_TOKEN environment variable."
+            }), 400
+        
+        # Fetch the Gmail message
+        gmail_message = fetch_gmail_message(message_id, access_token)
+        
+        if not gmail_message:
+            return jsonify({
+                "status": "error",
+                "message": f"Failed to fetch message {message_id} from Gmail API"
+            }), 404
+        
+        # Parse the message
+        email_data = parse_gmail_message(gmail_message)
+        
+        if not email_data:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to parse Gmail message"
+            }), 500
+        
+        return jsonify({
+            "status": "success",
+            "message": "Gmail message fetched successfully",
+            "data": email_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in Gmail message endpoint: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Internal server error: {str(e)}"
+        }), 500
+
+@app.route('/gmail/test', methods=['POST'])
+def test_gmail_api():
+    """
+    Test endpoint to verify Gmail API access
+    """
+    try:
+        request_data = request.get_json()
+        
+        if not request_data or 'message_id' not in request_data:
+            return jsonify({"error": "Please provide 'message_id' in request body"}), 400
+        
+        message_id = request_data['message_id']
+        access_token = os.environ.get('GMAIL_ACCESS_TOKEN')
+        
+        if not access_token:
+            return jsonify({
+                "status": "error",
+                "message": "Gmail access token not configured"
+            }), 400
+        
+        # Test Gmail API access
+        gmail_message = fetch_gmail_message(message_id, access_token)
+        
+        if gmail_message:
+            email_data = parse_gmail_message(gmail_message)
+            return jsonify({
+                "status": "success",
+                "message": "Gmail API test successful",
+                "data": email_data
+            }), 200
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to fetch message from Gmail API"
+            }), 404
+        
+    except Exception as e:
+        logger.error(f"Error in Gmail test endpoint: {str(e)}")
         return jsonify({
             "status": "error",
             "message": f"Internal server error: {str(e)}"

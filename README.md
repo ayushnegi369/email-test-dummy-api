@@ -1,15 +1,16 @@
-# Dummy Email API for Pub/Sub
+# Gmail Email API for Pub/Sub
 
-A Flask-based API that receives Google Cloud Pub/Sub messages containing email data and decodes them into a structured JSON format.
+A Flask-based API that receives Google Cloud Pub/Sub messages containing Gmail notifications and fetches actual email content using the Gmail API.
 
 ## Features
 
-- Receives Pub/Sub messages with email data
-- Decodes base64-encoded email messages
+- Receives Pub/Sub messages with Gmail push notifications
+- Integrates with Gmail API to fetch actual email content
 - Parses email content including subject, sender, date, body, and attachments
 - Returns structured JSON response in the specified format
 - Includes health check endpoint
-- Test endpoint for direct email parsing
+- Direct Gmail message fetching by message ID
+- Test endpoints for Gmail API integration
 
 ## API Endpoints
 
@@ -57,7 +58,31 @@ Receives Pub/Sub messages containing email data.
 }
 ```
 
-### 3. Test Endpoint
+### 3. Gmail Message Endpoint
+```
+GET /gmail/message/{message_id}
+```
+Directly fetch a Gmail message by message ID using the Gmail API.
+
+**Example:**
+```
+GET /gmail/message/18b2a1b2c3d4e5f6
+```
+
+### 4. Gmail API Test Endpoint
+```
+POST /gmail/test
+```
+Test endpoint to verify Gmail API access with a specific message ID.
+
+**Request Format:**
+```json
+{
+  "message_id": "18b2a1b2c3d4e5f6"
+}
+```
+
+### 5. Test Endpoint
 ```
 POST /test/email
 ```
@@ -112,6 +137,19 @@ curl -X POST http://localhost:5000/test/email \
 ## Environment Variables
 
 - `PORT`: Port number for the application (default: 5000)
+- `GMAIL_ACCESS_TOKEN`: Gmail API access token for fetching email content
+
+### Setting up Gmail API Access Token
+
+1. **Create a Google Cloud Project** and enable Gmail API
+2. **Create OAuth2 credentials** or service account
+3. **Generate an access token** using OAuth2 flow
+4. **Set the environment variable** in Render:
+   ```
+   GMAIL_ACCESS_TOKEN=your_access_token_here
+   ```
+
+**Note:** For production use, implement proper OAuth2 flow with refresh tokens.
 
 ## Logging
 
