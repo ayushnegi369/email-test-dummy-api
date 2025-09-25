@@ -31,6 +31,38 @@ def decode_pubsub_message(message_data):
         logger.error(f"Message data that failed: {message_data}")
         return None
 
+def handle_gmail_notification(notification_data):
+    """
+    Handle Gmail push notification and create a mock email response
+    Since we don't have Gmail API access, we'll create a structured response
+    """
+    try:
+        email_address = notification_data.get('emailAddress', 'unknown@gmail.com')
+        history_id = notification_data.get('historyId', 0)
+        
+        logger.info(f"Processing Gmail notification for {email_address}, historyId: {history_id}")
+        
+        # Create a mock email response based on the notification
+        # In a real implementation, you would use the Gmail API to fetch the actual email
+        mock_email = {
+            "subject": f"Gmail Notification - History ID {history_id}",
+            "from": email_address,
+            "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "body": f"Gmail push notification received for {email_address}. History ID: {history_id}. To get actual email content, implement Gmail API integration.",
+            "attachments": [],
+            "notification_data": {
+                "emailAddress": email_address,
+                "historyId": history_id,
+                "type": "gmail_push_notification"
+            }
+        }
+        
+        return mock_email
+        
+    except Exception as e:
+        logger.error(f"Error handling Gmail notification: {str(e)}")
+        return None
+
 def parse_email_message(raw_email):
     """
     Parse raw email message and extract structured data
@@ -44,12 +76,18 @@ def parse_email_message(raw_email):
             logger.error("Empty or whitespace-only email message received")
             return None
             
-        # Try to parse as JSON first (in case it's already structured)
+        # Try to parse as JSON first (in case it's Gmail notification or structured data)
         try:
             json_data = json.loads(raw_email)
-            if isinstance(json_data, dict) and 'subject' in json_data:
-                logger.info("Email data is already in JSON format")
-                return json_data
+            if isinstance(json_data, dict):
+                # Check if it's a Gmail push notification
+                if 'emailAddress' in json_data and 'historyId' in json_data:
+                    logger.info("Received Gmail push notification")
+                    return handle_gmail_notification(json_data)
+                # Check if it's already structured email data
+                elif 'subject' in json_data:
+                    logger.info("Email data is already in JSON format")
+                    return json_data
         except json.JSONDecodeError:
             pass  # Not JSON, continue with email parsing
         
